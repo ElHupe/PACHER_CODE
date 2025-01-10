@@ -1,0 +1,1106 @@
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+source(here::here("InitializeProject.R"))
+library(magrittr)
+library(tidyverse)
+```
+
+```{r plot_volcano_plots_DEGs_GSE128682}
+library(ggplot2)
+library(ggrepel)
+library(mdthemes)
+
+# define accesion and get DGEs
+
+accession <- "GSE128682"
+results <- rio::import(here::here(resultsdir, paste(accession, "DESeq2.RDS", sep = "_")),
+                       trust = TRUE)
+
+# relabel relevant columns so that we can reuse prior code
+results <- results %>%
+  purrr::map(function(df){
+    df %>%
+      dplyr::rename(logFC = log2FoldChange,
+             adj.P.Val = padj,
+             P.Value = pvalue)
+  })
+
+# define basic font sizes
+base_size = 10
+label_size_genes <- 3
+
+# number of genes to be labeled
+nLabels <- 15
+
+# cutoff for the FDR
+pValue <- 0.05
+
+# for the logFC
+logFClimit <- 2
+
+# set colors
+posLogFC <- "red"
+negLogFC <- "blue"
+nonSignif <- "grey"
+
+# generate a data frame to plot
+volcano_data <- results %>%
+  
+  # convert into one dataframe
+  bind_rows(.id = "CONTRAST") %>%
+  
+  # remove the overall contrast
+  filter(CONTRAST != "overall") %>%
+  # restrict logFC to [-8;8] and adjusted p-value to [0;1e-20]
+  dplyr::mutate(logFC = case_when(logFC < -8 ~ -8,
+                                  logFC > 8 ~ 8,
+                                  TRUE ~ logFC),
+                adj.P.Val = ifelse(adj.P.Val < 1E-20, 1E-20, adj.P.Val)) %>%
+  
+  # select the ceiling as max logFC
+  
+  mutate(CEILING = ceiling(max(abs(logFC) + 0.5))) %>%
+  
+  # define the coloring
+  mutate(COLOR = case_when(adj.P.Val > pValue ~ nonSignif, 
+                           logFC < -logFClimit ~ negLogFC, 
+                           logFC > logFClimit ~ posLogFC,
+                           TRUE ~ "black")) %>%
+  # define if gene should be labeled
+  mutate(LABEL = adj.P.Val < 0.05) %>%
+  # group by contrast
+  group_by(CONTRAST, LABEL) %>%
+  
+  # sort by logFC
+  arrange(desc(logFC), .by_group = TRUE) %>%
+  
+  # define the probes to be labeled by nLabel
+  mutate(ROWNUMBER = row_number())%>%
+  mutate(LABEL = LABEL & (ROWNUMBER <= nLabels | ROWNUMBER > max(ROWNUMBER) - nLabels)) %>%
+  ungroup() %>%
+  tidyr::nest(GROUP = -"CONTRAST") %>%
+  deframe
+
+# onize the names
+names <- names(volcano_data) %>%
+  str_replace_all("_", " ") %>%
+#  str_replace("TEC.CD105", "*ENG*^+ TEC") %>%
+#  str_replace("NEC.CD31", "*ENG*^-  NEC") %>%
+#  str_replace("NEC.CD105", "*ENG*^+ NEC") %>%
+str_replace("vs", " versus ")
+  
+# create volcano plots
+volcano_plots <- volcano_data %>%
+  purrr::map2(names,
+             function(x,y){
+               title <- y
+               ggplot(x, 
+                      aes(x=logFC, 
+                          y =-log10(adj.P.Val))) +
+                 geom_point(colour = x$COLOR,
+                            alpha=0.4,
+                            size = 0.1) +
+                 scale_x_continuous(limits = c(-unique(x$CEILING),
+                                               +unique(x$CEILING)),
+                                    breaks = seq(-unique(x$CEILING), 
+                                                 +unique(x$CEILING), 
+                                                 by = 1)) +
+                 geom_hline(yintercept = -log10(0.05)) +
+                 geom_vline(xintercept = -logFClimit) +
+                 geom_vline(xintercept = logFClimit) +
+                 ylim(c(0,25)) +
+                 geom_label_repel(
+                   data = filter(x, LABEL == TRUE),
+                   aes(label = SYMBOL),
+                   colour = filter(x, LABEL == TRUE) %>%
+                     dplyr::select(COLOR) %>%
+                     deframe(),
+                   force = 20,
+                   max.overlaps = 20,
+                   force_pull = 1,
+                   box.padding   = 0.1,
+                   point.padding = 0.1,
+                   label.padding = 0.1,
+                   size = label_size_genes) +
+                 xlab("log<sub>2</sub>(fold change)") + 
+                 ylab("-log<sub>10</sub>(adjusted p-value)") +
+                 # labs(title = title) +
+                 md_theme_bw(base_size = base_size) +
+                 as_md_theme(theme(plot.title = element_text(hjust = 0.5)))
+             })
+
+# save for later
+volcano_plots %>%
+  rio::export(here::here(plotsdir, "figures", "limma_volcanoplots.RDS"))
+```
+
+
+```{r figure_volcano_plots_DEGs}
+library(patchwork)
+library(mdthemes)
+
+# define accession and load plots
+accession <- "GSE128682"
+
+
+plots_DEGs <- rio::import(here::here(plotsdir, "figures", "limma_volcanoplots.RDS"),
+                          trust = TRUE)
+
+plot_pca <- rio::import(here::here(plotsdir, "figures", paste0(accession, "_PCA.RDS")),
+                                   trust = TRUE)
+
+# arrange plots fr the figure
+figure <- plot_pca +
+  plots_DEGs$diseased_vs_normal +
+  plots_DEGs$remission_vs_normal + 
+  plots_DEGs$diseased_vs_remission +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(axis_titles = "collect") &
+  theme(plot.tag = element_text(size = 18))
+
+# save as pdf
+figure %>%
+  ggsave(filename =  here::here(plotsdir, paste0(accession, "_DEGs.pdf")),
+         width = 13.92,
+         height = 13.92)
+
+
+```
+
+
+```{r plot_volcano_plots_gsva_GSE128682}
+
+# see above, basically the same as plot_volcano_plots_DEGs_GSE128682
+accession <- "GSE128682"
+
+results  <- rio::import(here::here(resultsdir, paste(accession, "LIMMA_GSVA.RDS", sep = "_")),
+                        trust = TRUE)
+
+
+results_GOBP <- results %>%
+  purrr::map(function(df){
+    df %>%
+      dplyr::filter(gs_subcat == "GO:BP") %>%
+      dplyr::mutate(adj.P.Val = p.adjust(P.Value, method = "BH")) %>%
+      dplyr::mutate(gs_name = str_replace_all(gs_name, "_", " "),
+                    gs_name = str_replace_all(gs_name, "GOBP", "")) %>%
+      dplyr::mutate(gs_name = tolower(gs_name)) %>%
+      dplyr::mutate(gs_name = str_wrap(gs_name, 20)) %>%
+      dplyr::rename(SYMBOL = gs_name)
+  })
+
+base_size = 10
+label_size_genes <- 3
+
+# number of genes to be labeled
+nLabels <- 10
+
+# cutoff for the FDR
+pValue <- 0.05
+logFClimit <- 0
+posLogFC <- "red"
+negLogFC <- "blue"
+nonSignif <- "grey"
+
+
+volcano_data <- results_GOBP %>%
+  
+  # convert into one dataframe
+  bind_rows(.id = "CONTRAST") %>%
+  
+  # remove the overall contrast
+  filter(CONTRAST != "overall") %>%
+  dplyr::mutate(logFC = case_when(logFC < -8 ~ -8,
+                                  logFC > 8 ~ 8,
+                                  TRUE ~ logFC),
+                adj.P.Val = ifelse(adj.P.Val < 1E-20, 1E-20, adj.P.Val)) %>%
+  
+  # select the ceiling
+  
+  mutate(CEILING = ceiling(max(abs(logFC)))) %>%
+  
+  # define the coloring
+  mutate(COLOR = case_when(adj.P.Val > pValue ~ nonSignif, 
+                           logFC < -logFClimit ~ negLogFC, 
+                           logFC > logFClimit ~ posLogFC,
+                           TRUE ~ "black")) %>%
+  mutate(LABEL = adj.P.Val < 0.05) %>%
+  # group by contrast
+  group_by(CONTRAST, LABEL) %>%
+  
+  # sort by logFC
+  arrange(desc(logFC), .by_group = TRUE) %>%
+  
+  # define the probes to be labeled
+  mutate(ROWNUMBER = row_number())%>%
+  mutate(LABEL = LABEL & (ROWNUMBER <= nLabels | ROWNUMBER > max(ROWNUMBER) - nLabels)) %>%
+  ungroup() %>%
+  tidyr::nest(GROUP = -"CONTRAST") %>%
+  deframe
+
+names <- names(volcano_data) %>%
+  str_replace_all("_", " ") %>%
+#  str_replace("TEC.CD105", "*ENG*^+ TEC") %>%
+#  str_replace("NEC.CD31", "*ENG*^-  NEC") %>%
+#  str_replace("NEC.CD105", "*ENG*^+ NEC") %>%
+str_replace("vs", " versus ")
+  
+volcano_plots <- volcano_data %>%
+  purrr::map2(names,
+             function(x,y){
+               title <- y
+               ggplot(x, 
+                      aes(x=logFC, 
+                          y =-log10(adj.P.Val))) +
+                 geom_point(colour = x$COLOR,
+                            alpha=0.4,
+                            size = 0.1) +
+                 scale_x_continuous(limits = c(-unique(x$CEILING),
+                                               +unique(x$CEILING)),
+                                    breaks = seq(-unique(x$CEILING), 
+                                                 +unique(x$CEILING), 
+                                                 by = 1)) +
+                 geom_hline(yintercept = -log10(0.05)) +
+                 geom_vline(xintercept = -logFClimit) +
+                 geom_vline(xintercept = logFClimit) +
+                 ylim(c(0,20)) +
+                 geom_label_repel(
+                   data = filter(x, LABEL == TRUE),
+                   aes(label = SYMBOL),
+                   colour = filter(x, LABEL == TRUE) %>%
+                     dplyr::select(COLOR) %>%
+                     deframe(),
+                   force = 20,
+                   max.overlaps = 50,
+                   force_pull = 1,
+                   box.padding   = 0.1,
+                   point.padding = 0.1,
+                   label.padding = 0.1,
+                   size = label_size_genes) +
+                 xlab("GSVA score difference") + 
+                 ylab("-log<sub>10</sub>(adjusted p-value)") +
+                 # labs(title = title) +
+                 md_theme_bw(base_size = base_size) +
+                 as_md_theme(theme(plot.title = element_text(hjust = 0.5)))
+             })
+
+volcano_plots %>%
+  rio::export(here::here(plotsdir, "figures", "gsva_limma_GOBP_volcanoplots.RDS"))
+
+
+results_WIKIPATHWAYS <- results %>%
+  purrr::map(function(df){
+    df %>%
+      dplyr::filter(gs_subcat == "CP:WIKIPATHWAYS") %>%
+      dplyr::mutate(adj.P.Val = p.adjust(P.Value, method = "BH")) %>%
+      dplyr::mutate(gs_name = str_replace_all(gs_name, "_", " "),
+                    gs_name = str_replace_all(gs_name, "WP", "")) %>%
+      dplyr::mutate(gs_name = tolower(gs_name)) %>%
+      dplyr::mutate(gs_name = str_wrap(gs_name, 20)) %>%
+      dplyr::rename(SYMBOL = gs_name)
+  })
+
+base_size = 10
+label_size_genes <- 3
+
+# number of genes to be labeled
+nLabels <- 15
+
+# cutoff for the FDR
+pValue <- 0.05
+logFClimit <- 0
+posLogFC <- "red"
+negLogFC <- "blue"
+nonSignif <- "grey"
+
+
+volcano_data <- results_WIKIPATHWAYS %>%
+  
+  # convert into one dataframe
+  bind_rows(.id = "CONTRAST") %>%
+  
+  # remove the overall contrast
+  filter(CONTRAST != "overall") %>%
+  dplyr::mutate(logFC = case_when(logFC < -8 ~ -8,
+                                  logFC > 8 ~ 8,
+                                  TRUE ~ logFC),
+                adj.P.Val = ifelse(adj.P.Val < 1E-20, 1E-20, adj.P.Val)) %>%
+  
+  # select the ceiling
+  
+  mutate(CEILING = ceiling(max(abs(logFC)))) %>%
+  
+  # define the coloring
+  mutate(COLOR = case_when(adj.P.Val > pValue ~ nonSignif, 
+                           logFC < -logFClimit ~ negLogFC, 
+                           logFC > logFClimit ~ posLogFC,
+                           TRUE ~ "black")) %>%
+  mutate(LABEL = adj.P.Val < 0.05) %>%
+  # group by contrast
+  group_by(CONTRAST, LABEL) %>%
+  
+  # sort by logFC
+  arrange(desc(logFC), .by_group = TRUE) %>%
+  
+  # define the probes to be labeled
+  mutate(ROWNUMBER = row_number())%>%
+  mutate(LABEL = LABEL & (ROWNUMBER <= nLabels | ROWNUMBER > max(ROWNUMBER) - nLabels)) %>%
+  ungroup() %>%
+  tidyr::nest(GROUP = -"CONTRAST") %>%
+  deframe
+
+names <- names(volcano_data) %>%
+  str_replace_all("_", " ") %>%
+  str_replace("vs", " versus ")
+  
+volcano_plots <- volcano_data %>%
+  purrr::map2(names,
+             function(x,y){
+               title <- y
+               ggplot(x, 
+                      aes(x=logFC, 
+                          y =-log10(adj.P.Val))) +
+                 geom_point(colour = x$COLOR,
+                            alpha=0.4,
+                            size = 0.1) +
+                 scale_x_continuous(limits = c(-unique(x$CEILING),
+                                               +unique(x$CEILING)),
+                                    breaks = seq(-unique(x$CEILING), 
+                                                 +unique(x$CEILING), 
+                                                 by = 1)) +
+                 geom_hline(yintercept = -log10(0.05)) +
+                 geom_vline(xintercept = -logFClimit) +
+                 geom_vline(xintercept = logFClimit) +
+                 ylim(c(0,20)) +
+                 geom_label_repel(
+                   data = filter(x, LABEL == TRUE),
+                   aes(label = SYMBOL),
+                   colour = filter(x, LABEL == TRUE) %>%
+                     dplyr::select(COLOR) %>%
+                     deframe(),
+                   force = 20,
+                   max.overlaps = 50,
+                   force_pull = 1,
+                   box.padding   = 0.1,
+                   point.padding = 0.1,
+                   label.padding = 0.1,
+                   size = label_size_genes) +
+                 xlab("GSVA score difference") + 
+                 ylab("-log<sub>10</sub>(adjusted p-value)") +
+                 # labs(title = title) +
+                 md_theme_bw(base_size = base_size) +
+                 as_md_theme(theme(plot.title = element_text(hjust = 0.5)))
+             })
+
+volcano_plots %>%
+  rio::export(here::here(plotsdir, "figures", "gsva_limma_WP_volcanoplots.RDS"))
+```
+
+```{r figure_volcano_plots_gsva}
+# see above, basically the same as in figure_volcano_plots_DEGs
+library(patchwork)
+
+accession <- "GSE128682"
+
+
+plots_GOBP <- rio::import(here::here(plotsdir, "figures", "gsva_limma_GOBP_volcanoplots.RDS"),
+                          trust = TRUE)
+
+plots_wikipathways <- rio::import(here::here(plotsdir, "figures", "gsva_limma_WP_volcanoplots.RDS"),
+                          trust = TRUE)
+
+figure <- plots_GOBP$C5.diseased_vs_normal +
+  plots_GOBP$C5.remission_vs_normal + 
+  plots_GOBP$C5.diseased_vs_remission +
+  plots_wikipathways$C2.diseased_vs_normal +
+  plots_wikipathways$C2.remission_vs_normal +
+  plots_wikipathways$C2.diseased_vs_remission +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(axis_titles = "collect")&
+  theme(plot.tag = element_text(size = 18))
+
+figure %>%
+  ggsave(filename =  here::here(plotsdir, paste0(accession, "_gsva.pdf")),
+         width = 13.92,
+         height = 9.27)
+
+```
+
+
+```{r figure_cluster_profiler}
+
+library(clusterProfiler)
+library(patchwork)
+# define accession and get results
+accession <- "GSE128682"
+results_filtered <- rio::import(here::here(resultsdir, paste(accession, "clusterProfiler.RDS", sep = "_")),
+                                trust = TRUE)
+# replace "_", "WP", etc in the description with porper aracters
+plot_data <- results_filtered %>%
+  purrr::map(function(df){
+    df %>%
+      dplyr::mutate(Description = str_replace(Description,"GOBP_", "")) %>%
+      dplyr::mutate(Description = str_replace(Description,"WP_", "")) %>%
+      dplyr::mutate(Description = str_replace_all(Description,"_", " ")) %>%
+      dplyr::mutate(Description = tolower(Description)) %>%
+      dplyr::mutate(Description = str_wrap(Description, width = 100))
+  })
+
+# create dotplots
+plots <- plot_data %>%
+  purrr::map(function(df){
+    dotplot(df,
+            font.size = 8)
+  })
+
+# arrange dotplots to a figure
+figure <- plots$diseased_vs_normal.C5 +
+  plots$remission_vs_normal.C5 +
+  plots$diseased_vs_remission.C5 +
+  plots$diseased_vs_normal.C2 +
+  plots$remission_vs_normal.C2 +
+  plots$diseased_vs_remission.C2 +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(axis_titles = "collect") &
+  theme(plot.tag = element_text(size = 18))
+
+# save for later
+figure %>%
+  ggsave(filename =  here::here(plotsdir, paste0(accession, "_dotplots.pdf")),
+         width = 13.92,
+         height = 13.92)
+```
+
+
+```{r dendrogram_GSE128682}
+library(tidyverse)
+library(magrittr)
+library(WGCNA)
+library(Biobase)
+library(cowplot)
+
+# get the network and the data
+accession <- "GSE128682"
+
+net <- rio::import(here::here(datadir, paste(accession, "net", "RDS", sep = ".")))
+
+# define dimenstions
+height <- 5.2/3*2
+
+# open png device
+png(filename = file.path(plotsdir, "dendro.png"),
+    width = height * 2,
+    height = height,
+    units = "in",
+    res = 300
+    # pointsize = font_size
+)
+par(mar = c(0,0,0,0))
+
+# plot the dendrogram
+WGCNA::plotDendroAndColors(net$dendrograms[[1]],
+                           colors = data.frame(colors=labels2colors(net$colors[net$goodGenes])),
+                           dendroLabels = FALSE,
+                           main = "",
+                           groupLabels = c("modules"),
+                           cex.colorLabels = 0.75,
+                           cex.axis = 0.5,
+                           cex.lab = 0.8,
+                           marAll = c(0,4,0,0),
+                           lwd = 0.5)
+dev.off()
+
+# reimport the png for ggplot2 and save for later
+plot <- ggdraw() +
+  draw_image(file.path(plotsdir, "dendro.png")) %T>%
+saveRDS(file.path(plotsdir, paste("DendrogramPlot", accession, "RDS", sep=".")))
+```
+
+```{r figure_heatmap_dendrogram}
+library(patchwork)
+library(cowplot)
+
+# import dendrogram
+dendrogram <- ggdraw() +
+  draw_image(here::here(plotsdir, "dendro.png")) 
+
+# import heatmap data
+heatmap <- rio::import(here::here(plotsdir, paste("HeatmapPlot", accession, "RDS", sep=".")),
+                       trust = TRUE)
+# define layout
+layout <- "ABBBBB"
+
+# draw the figure using patchwork
+figure <- heatmap + dendrogram +
+  plot_layout(design = layout) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(face = "plain",
+                                size = 10)) &
+  theme(plot.tag = element_text(size = 18))
+
+# save as PDF
+figure %>%
+  ggsave(filename =  here::here(plotsdir, paste0(accession, "_dendrograms.pdf")),
+         width = 13.92,
+         height = 9.27)
+```
+
+
+```{r figure_biologic_context_modules}
+# essentially the same as in figure_cluster_profiler
+library(patchwork)
+library(clusterProfiler)
+
+accession <- "GSE128682"
+
+
+results <- rio::import(here::here(resultsdir, "modulecontext.RDS"),
+                       trust = TRUE)
+
+results_filtered <- results
+
+plot_data <- results_filtered %>%
+  purrr::map(function(df){
+    try(df %>%
+      dplyr::mutate(Description = str_replace(Description,"GOBP_", "")) %>%
+      dplyr::mutate(Description = str_replace(Description,"WP_", "")) %>%
+      dplyr::mutate(Description = str_replace_all(Description,"_", " ")) %>%
+      dplyr::mutate(Description = tolower(Description)) %>%
+      dplyr::mutate(Description = str_wrap(Description, width = 100)))
+  })
+
+
+plots <- plot_data %>%
+  purrr::map(function(df){
+    try(dotplot(df,
+                font.size = 8))
+  })
+figure <- plots$M19.C5 + 
+  plots$M5.C5 + 
+  plots$M3.C5 +
+  plots$M30.C5 +
+  plots$M1.C5 +
+  plots$M22.C5 +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(axis_titles = "collect") &
+  theme(plot.tag = element_text(size = 18))
+
+figure %>%
+  ggsave(filename =  here::here(plotsdir, paste0(accession, "_modules_BP.pdf")),
+         width = 13.92,
+         height = 9.27)
+
+figure <- plots$M19.C2 + 
+  plots$M5.C2 + 
+  plots$M3.C2 +
+  plots$M30.C2 +
+  plots$M1.C2 +
+  plots$M22.C2 +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(axis_titles = "collect") &
+  theme(plot.tag = element_text(size = 18))
+
+figure %>%
+  ggsave(filename =  here::here(plotsdir, paste0(accession, "_modules_WP.pdf")),
+         width = 13.92,
+         height = 9.27)
+
+```
+
+
+```{r figure_eigengene_plots}
+library(tidyverse)
+library(magrittr)
+library(ggpubr)
+library(WGCNA)
+library(limma)
+library(mdthemes)
+
+# define functions to display numbers
+unicode_minus <- function(x){
+  sub('^-', '\U2212', format(x))
+}
+
+# define a function to display a number as a scientific 10
+scientific_10 <- function(x) {
+  x %>%
+    purrr::map_chr(function(x){
+      gsub("e", " %*% 10^", scales::scientific_format()(x))
+    })
+}
+# define accession
+accession <- "GSE128682"
+
+## get the network and the data
+net <- rio::import(here::here(datadir, paste(accession, "net", "RDS", sep = ".")),
+                   trust = TRUE)
+
+# define the groups. The ordering of the groups in the plot happens here !!!
+groups <- factor(net$dds$STATUS,
+                 levels = c("normal", "diseased", "remission"))
+
+# define comparisons
+comparisons <- list(c("diseased", "normal"),
+                    c("remission", "normal"),
+                    c("diseased", "remission"))
+
+# extract the module colors
+moduleColors = paste("M", net$colors, sep = "")
+
+# Calculate MEs with color labels
+data <- WGCNA::moduleEigengenes(net$params$datExpr, moduleColors)$eigengenes %>%
+  
+  # remove grey
+  dplyr::select(-MEM0) %>%
+  
+  # rename the color names from ME<color> to <color>
+  rename_all(~ str_replace(.,"ME", "")) %>%
+  
+  # add the sampleID
+  rownames_to_column(var = "SAMPLE") %>%
+  
+  # add the groups
+  mutate(GROUP = groups) %>%
+  
+  # pivot to long representation
+  pivot_longer(!(matches("SAMPLE") | matches("GROUP")),
+               names_to = "MODULE",
+               values_to = "VALUE") %>%
+  
+  # add the color
+  mutate(COLOR = WGCNA::labels2colors(as.numeric(str_replace(MODULE, "M", ""))))
+
+# draw the plots as violin plots
+eigengene.plots.violin <- data %>%
+  tidyr::nest(GROUP = -"MODULE") %>%
+  deframe() %>%
+  purrr::map2(names(.),
+              function(x,y){
+                # calculate the p-values
+                comparison <- compare_means(VALUE ~ GROUP, 
+                                            x, 
+                                            method = "t.test", 
+                                            p.adjust.method = "hochberg") %>%
+                  mutate(y.position = c(0.5, 0.7, 0.5)) %>%
+                  mutate(x.min = c()) %>%
+                  mutate(p.sci = paste(scientific_10(p.adj))) # %>%
+                  # mutate(p.sci = paste("expression(", p.sci, ")", sep = "")) # %>%
+                  # dplyr::filter(p.adj < 0.05)
+                # call the plotting function
+                ggplot(x, aes(x = GROUP,
+                              y = VALUE))+ 
+                  geom_violin(stat="ydensity",
+                              fill = unique(x$COLOR),
+                              size = 0.25) +
+                  geom_boxplot(width=0.1,
+                               size = 0.25,
+                               outlier.size=0.1) +
+                  ylim(-1, 1) +
+                  annotate(geom = "text",
+                           x = 1,
+                           y = 1,
+                           label = paste("Module:", y),
+                           size = 4,
+                           hjust = 0) +
+                  #geom_text(x = 1, 
+                  #          y = 1,
+                  #          label = paste("Module:", y)) +
+                  geom_hline(yintercept = 0,
+                             size = 0.25) +
+                  labs(x = "",
+                       y = "eigengene expression") +
+                  scale_x_discrete(labels = c("normal tissue",
+                                              "diseased tissue",
+                                              "tissue in remission")) +
+                  # stat_pvalue_manual(comparison, 
+                  #                   label = "{paste(text = p.sci)}",
+                  #                  size = 2.1234) +
+                   geom_signif(annotations = comparison$p.sci,
+                               y_position = comparison$y.position,
+                              xmin = comparison$group1, 
+                              xmax = comparison$group2,
+                              parse = TRUE,
+                              size = 0.2,
+                              textsize = 3) +
+                  theme_bw(base_size = 12) +
+                  theme(axis.text.x = element_text(angle=90))}
+  )
+
+
+  # save everything
+eigengene.plots.violin %>%
+  rio::export(here::here(plotsdir, paste(accession, "EigengenePlotsViolin", "RDS", sep=".")))
+
+# combine the plots as figure
+figure <- eigengene.plots.violin$M19 + 
+  eigengene.plots.violin$M5 + 
+  eigengene.plots.violin$M3 +
+  eigengene.plots.violin$M30 +
+  eigengene.plots.violin$M1 +
+  eigengene.plots.violin$M22 +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(axis_titles = "collect") &
+  theme(plot.tag = element_text(size = 18))
+
+# save as pdf
+figure %>%
+  ggsave(filename =  here::here(plotsdir, paste0(accession, "_eigengenes.pdf")),
+         width = 13.92,
+         height = 9.27)
+
+```
+
+```{r figure_networks}
+library(tidygraph)
+library(ggraph)
+library(ggrepel)
+library(rDGIdb)
+library(patchwork)
+
+# define font sizes
+label_size_genes <- 4
+base_size = 10
+
+accession <- "GSE128682"
+
+
+# load network
+network <- rio::import(file.path(resultsdir, 
+                    paste(accession, 
+                          "network.RDS", 
+                          sep = ".")),
+                    trust = TRUE)
+
+# get potential targetable drugs from DGIdb
+DGIDB <- rio::import(here::here(datadir, "interactions.tsv")) %>%
+  dplyr::select(gene_name) %>%
+  deframe() %>%
+  unique()
+
+# set hubgene threshold - select the top fraction
+threshold <- 0.05
+
+# alternatively set number threshold
+network <- network %>%
+  activate(nodes) %>%
+  mutate(SYMBOL = name) %>%
+  mutate(SYMBOL_COLOR = ifelse(SYMBOL %in% DGIDB, "red", "black"))
+
+# threshold the netorks by connectivity
+networks_thresholded <- network %>%
+  activate(edges) %>%
+  arrange(weight) %>%
+  activate(nodes) %>%
+  dplyr::arrange(desc(kWithin.norm)) %>%
+  group_by(module) %>%
+  mutate(fraction = (row_number()-1)/n()) %>%
+  dplyr::filter(fraction <= threshold) %>%
+  ungroup %>%
+  to_split(module) %>%
+  set_names(str_replace(names(.), "module: ", ""))
+
+# plot the networks
+plots <- networks_thresholded %>%
+  purrr::map2(names(.),
+              function(x,y){
+                #extract the label colours
+                color <- WGCNA::labels2colors(as.numeric(str_replace(y, "M", "")))
+                # define the label colours
+                label_colours <- x %>%
+                  activate("nodes") %>%
+                  data.frame() %>%
+                  dplyr::select(SYMBOL_COLOR) %>%
+                  deframe()
+                # define the layout
+                layout <- igraph::layout_in_circle(x) %>%
+                                   .[,c(2,1)] %>%
+                  set_colnames(c("x", "y"))
+                # draw the graph using try, in order not to interrupt the loop on error
+                try(x %>% ggraph(layout = layout) +
+                      geom_edge_link(aes(colour = as.factor(COLOR),
+                                         alpha = weight^20,
+                                         width = weight^4),
+                                         # edge_width = 0.1), 
+                                     show.legend = FALSE,
+                                     end_cap = circle(2, "mm"),
+                                     start_cap = circle(2, "mm")) +
+                      scale_edge_color_manual(values = x %>%
+                                                activate("nodes") %>%
+                                                activate("edges") %>%
+                                                data.frame(stringsAsFactors = FALSE) %>%
+                                                dplyr::select(COLOR) %>%
+                                                deframe()) +
+                      scale_edge_width(range = c(0,1)) +
+                      geom_node_point(aes(size = kWithin.norm),
+                                      fill = color,
+                                      colour = "black",
+                                      pch = 21) +
+                      scale_size(range = c(0.1,4),
+                                 limits = c(0,1),
+                                 breaks = c(0, 0.25, 0.5, 0.75, 1.0)) +
+                      ggtitle(label = paste("Module:", y)) +
+                      ggraph::geom_node_label(aes(label = SYMBOL),
+                                      repel=TRUE,
+                                      force = 5,
+                                      colour  = label_colours,
+                                      show.legend = FALSE,
+                                      size = label_size_genes,
+                                      label.padding = 0.1,
+                                      alpha = 0.6,
+                                      vjust = "outward",
+                                      hjust = "outward") +
+                      labs(size = "connectivity") +
+                      theme_graph(base_size = base_size,
+                                  base_family="sans") +
+                      theme(legend.position = "bottom",
+                            legend.title = element_text(size = 10),
+                            legend.text=element_text(size=6),
+                            plot.margin=grid::unit(c(2,2,2,2), "mm"),
+                            plot.title = element_text(size = 12,
+                                                      face = "plain")) +
+                      guides(size = guide_legend(title.position="top", 
+                                                 title.hjust = 0.5,
+                                                 fill = "black",
+                                                 override.aes=list(fill = "black"))))})
+
+# export plots
+plots %>%
+  rio::export(file.path(resultsdir, "network_plots.RDS"))
+
+# define the figure
+figure <- plots$M19 + 
+  plots$M5 + 
+  plots$M3 +
+  plots$M30 +
+  plots$M1 +
+  plots$M22 +
+  plot_annotation(tag_levels = "A") +
+  plot_layout(guides = "collect") & 
+  theme(legend.position = 'bottom',
+        plot.tag = element_text(size = 18))
+  
+
+# save as pdfs
+figure %>%
+  ggsave(filename =  here::here(plotsdir, paste0(accession, "_networks.pdf")),
+         width = 13.92,
+         height = 9.27)
+```
+
+
+```{r pathway_visualization_with_cytoscape}
+library(RCy3)
+library(limma)
+library(msigdbr)
+library(cowplot)
+library(patchwork)
+
+# define accession and load data
+accession <- "GSE128682"
+
+# extract the pathways of interest
+pathways_of_interest <- rio::import(here::here(resultsdir, "GSE128682_clusterProfiler.RDS"),
+                                    trust = TRUE) %>%
+  purrr::map(function(cp){
+    cp %>%
+      arrange(desc(eval(parse(text = GeneRatio)))) %>%
+      data.frame %>%
+      slice_head(n = 10)
+  }) %>%
+  bind_rows(.id = "CONTRAST") %>%
+  dplyr::filter(str_detect(CONTRAST, "C2")) %>%
+  dplyr::select(ID) %>%
+  deframe %>%
+  unique %>%
+  set_names(.,.)
+
+# extract the pathway IDs from the molecular signatire database
+pathways <- msigdbr(species = "Homo sapiens") %>%
+  dplyr::filter(gs_id %in% pathways_of_interest) %>%
+  dplyr::select(gs_exact_source) %>%
+  deframe %>%
+  unique
+
+# load the DEG results and rename columns that we can reuse previous code
+limma_results <- rio::import(here::here(resultsdir, paste(accession, "DESeq2.RDS", sep = "_")),
+                             trust = TRUE) %>%
+  purrr::map2(.,
+              names(.),
+              function(x,y){
+                x <- x %>%
+                  dplyr::rename(logFC = log2FoldChange,
+                                AveExpr = baseMean,
+                                t = stat,
+                                P.Value = pvalue,
+                                adj.P.Val = padj)
+                x %>% 
+                  dplyr::select("SYMBOL", 
+                                "logFC",
+                                "AveExpr",
+                                "t",
+                                "P.Value",
+                                "adj.P.Val") %>%
+                  set_names(c("SYMBOL", paste(c("logFC",
+                                            "AveExpr",
+                                            "t",
+                                            "P.Value",
+                                            "adj.P.Val"),
+                                          y,
+                                          sep = "_")))
+  }) %>%
+  reduce(left_join, by = "SYMBOL")
+
+# construct cytoscape commands, this command imports pathways
+commands <- paste0('wikipathways import-as-pathway id=',pathways) %>%
+  unique()
+
+# pass the commands to  RCy3
+
+commands %>%
+  purrr::map(commandsRun)
+
+# get the queried networks
+networks <- getNetworkList()
+
+# pass the DEGs (logFC etc. to RCy3)
+networks %>%
+  purrr::map(function(x){
+    print(x)
+    loadTableData(limma_results,
+                  data.key.column = "SYMBOL",
+                  table = "node",
+                  table.key.column = "name",
+                  namespace = "default",
+                  network = x)
+  })
+
+# get networks
+networks <- getNetworkList()
+
+# remove the species from the name
+names(networks) <- str_replace(networks, " - Homo sapiens", "") %>%
+  make.names() %>%
+  str_replace_all("\\.", "_")
+
+# After having created styles in Cytoscape, pss Style setting commands and file saving commands to RCy3
+networks %>%
+  purrr::map2(.,
+              names(.),
+              function(x,y){
+                file_name <- here::here(plotsdir, "diseased_vs_normal", paste(y, "png", sep = "."))
+                setVisualStyle(style.name = "diseased_vs_normal", 
+                               network = x)
+                fitContent(selected.only = FALSE, 
+                           network = x)
+                exportImage(filename = file_name,
+                            type = "PNG",
+                            zoom = 500,
+                            network = x)
+              })
+
+# do the same for the next style
+networks %>%
+  purrr::map2(.,
+              names(.),
+              function(x,y){
+                file_name <- here::here(plotsdir, "diseased_vs_remission", paste(y, "png", sep = "."))
+                setVisualStyle(style.name = "diseased_vs_remission", 
+                               network = x)
+                fitContent(selected.only = FALSE, 
+                           network = x)
+                exportImage(filename = file_name,
+                            type = "PNG",
+                            zoom = 500,
+                            network = x)
+              })
+
+# and the final style
+networks %>%
+  purrr::map2(.,
+              names(.),
+              function(x,y){
+                file_name <- here::here(plotsdir, "remission_vs_normal", paste(y, "png", sep = "."))
+                setVisualStyle(style.name = "remission_vs_normal", 
+                               network = x)
+                fitContent(selected.only = FALSE, 
+                           network = x)
+                exportImage(filename = file_name,
+                            type = "PNG",
+                            zoom = 500,
+                            network = x)
+              })
+
+```
+
+```{r pathways_figures}
+library(patchwork)
+library(cowplot)
+library(magick)
+
+# set the palces to search for pngs
+directories <- c("diseased_vs_normal",
+                 "diseased_vs_remission",
+                 "remission_vs_normal") %>%
+  set_names(.,.) %>%
+  purrr::map(function(name){
+    here::here(plotsdir, name)
+  })
+
+# set the plot names
+plots <- directories %>%
+  purrr::map(dir, pattern = "png$", 
+             full.names = TRUE) %>%
+  unlist %>%
+  unique
+
+# crop the plots to the content
+plots %>%
+  purrr::map(function(plot){
+    cropped_plot <- str_replace(plot, "\\.png", "_cropped.png")
+    img <- image_read(plot)
+    # Automatically crop the image to its content
+    cropped_img <- image_trim(img)
+    # Save the cropped image
+    image_write(cropped_img, cropped_plot)
+  })
+
+# get plot names
+plots <- directories %>%
+  purrr::map(dir, pattern = "cropped.png$", full.names = TRUE) %>%
+  purrr::map(basename) %>%
+  unlist %>%
+  unique %>%
+  set_names(.,.)
+
+# read the plots to a list suitable for ggdraw
+figures <- plots %>%
+  purrr::map(function(plot){
+    left <- ggdraw() +
+      draw_image(here::here(plotsdir, "diseased_vs_normal", plot))
+    right <- ggdraw() +
+      draw_image(here::here(plotsdir, "remission_vs_normal", plot))
+    left + 
+      right +
+      plot_layout(ncol = 1) +
+      plot_annotation(tag_levels = "A")  &
+      theme(plot.tag = element_text(size = 18,
+                                    face = "plain"))
+  })
+
+# save the figures as pdf
+figures %>%
+  purrr::map2(names(.),
+             function(plot, filename){
+               filename <- here::here(plotsdir, filename) %>%
+                 str_replace("_cropped.png", "\\.pdf")
+               ggsave(filename,
+                      plot,
+                      width = 13.92,
+                      height = 13.92)
+             })
+
+```
+
+
+
